@@ -1,0 +1,1412 @@
+# load packages
+library(tidyverse)
+library(glue)
+library(ggrepel)
+library(calecopal) # kelp1 colour scheme
+library(stringr)
+library(ggplot2)
+library(ggmap)
+# library(gdsfmt) need to update R version
+library(SNPRelate)
+library(reshape2)
+library(car)
+library(emmeans)
+library(dplyr)
+library(readr)
+library(tibble)
+library(tidyr)
+library(forcats)
+library(ggthemes)
+library(patchwork)
+library(remotes)
+library(genepop)
+library(adegenet)
+library(ade4)
+library(RColorBrewer)
+library(snpR)
+library(hierfstat)
+library(ggmanh)
+library(ggpubr)
+library(poppr)
+library(scales)
+
+
+
+kelp.continuous <- cal_palette(name = "kelp1", n = 20, type = "continuous")
+show_col(kelp.continuous)
+kelp.standard <- cal_palette(name = "kelp1")
+# Brantford = #C70000
+# Guelph = #FFBF00
+# Kitchener = #BE8333
+# London = #54662C
+# St. Catharines = #009BB0
+# Toronto = #114C54
+
+show_col(kelp.standard)
+# ggplot figure theme ----------------------------------------------------------
+basic_theme <- function() {
+  theme_classic() + theme(
+    strip.background = element_rect(linetype = 0), # white background
+    panel.border = element_rect(colour = "black", fill = NA, linewidth = 1), # border around plots
+    axis.line = element_line(colour = "black"), # black axis
+    axis.ticks = element_line(colour = "black", linewidth = 1), # black tick marks
+    axis.text.x = element_text(size = 12, colour = "black"), # axis labels size & colour
+    axis.text.y = element_text(size = 12, colour = "black"),
+    strip.text.x = element_text(size = 10, colour = "black") # facet wrap/grid labels
+  )
+}
+#######################################################
+#
+#   Read in datafiles that are used for multiple steps
+#
+#######################################################
+# set working directory
+setwd()
+
+# load pop info
+Dan.info <- read.csv("Dan_info.csv", sep = ",", header = TRUE)
+Rhys.info <- read.csv("Rhys_info.csv", sep = ",", header = TRUE)
+Tet.info <- read.csv("Tet_info.csv", sep = ",", header = TRUE)
+
+# Read in the data and convert to genind
+Rhys.populations.gen <- read.genepop("Rhys_populations.snps.gen")
+# add strata to genind object
+Rhysdf <- read.csv("Rhys_samples.csv", header = TRUE, sep = ",")
+strata(Rhys.populations.gen) <- Rhysdf
+# Read in genepop file and convert to genind
+Tet.populations.gen <- read.genepop("Tet_populations.snps.gen")
+# add strata to genind object
+Tetdf <- read.csv("Tet_samples.csv", header = TRUE, sep = ",")
+strata(Tet.populations.gen) <- Tetdf
+# Read in genepop file and convert to genind
+Danaus.populations.gen <- read.genepop("Dan_v2_populations.snps.gen")
+# add strata to genind object
+Dandf <- read.csv("Dan_samples.csv", header = TRUE, sep = ",")
+strata(Danaus.populations.gen) <- Dandf
+
+#################################
+#
+#  Making the Sampling Map
+#
+##################################
+species.info <- rbind(Dan.info, Rhys.info, Tet.info) %>%
+  mutate(
+    Population = substr(sample.id, 1, nchar(sample.id) - 3), # create populations column
+    City = if_else(City == "St_Catharines", "St. Catharines", City)
+  )
+# make bounding box
+can <- c(left = -81.5, right = -78.5, bottom = 42.5, top = 44.5)
+
+register_google(key = )
+## Get map from google
+ON_big <- get_map(location = can, source = "google", maptype = "satellite")
+# Make colors that will stand out on the map. The kelp1 pallette has 2 greens that don't show up, so using a different one for just the map
+milkweedmap <- c("#feebe2", "#fcc5c0", "#fa9fb5", "#f768a1", "#c51b8a", "#7a0177")
+## Plot points and colour by city
+site.map <- ggmap(ON_big) +
+  geom_point(
+    data = species.info,
+    mapping = aes(
+      x = Long, y = Lat,
+      fill = City,
+      color = Habitat,
+      shape = Habitat
+    )
+  ) +
+  scale_shape_manual(
+    values = c(24, 21), name = "Habitat",
+    guide = guide_legend(override.aes = list(
+      fill = "black",
+      color = "black"
+    ))
+  ) +
+  scale_colour_manual(values = c("black", "black", "black", "black", "black", "black")) +
+  scale_fill_manual(
+    values = milkweedmap, name = "City",
+    guide = guide_legend(override.aes = list(
+      color = milkweedmap,
+      shape = 18,
+      size = 5
+    ))
+  ) +
+  labs(x = "Longitude", y = "Latitude")
+site.map
+
+#####################################
+#
+#   Pi calculations
+#   Pi was estimated using Stacks
+#
+#####################################
+# read in populations output data ----------------------------------------------
+# N.B. that header information has to be manually removed
+Dan.df.pi <- read.csv("Dan.sumstats_summary_varAndFixed.tsv", sep = "\t") %>% mutate(Species = "Danaus")
+Rhys.df.pi <- read.csv("Rhys.sumstats_summary_varAndFixed.tsv", sep = "\t") %>% mutate(Species = "Rhyssomatus")
+Tet.df.pi <- read.csv("Tet.sumstats_summary_varAndFixed.tsv", sep = "\t") %>% mutate(Species = "Tetraopes")
+
+# combine dfs, add metadata
+df.pi <- rbind(Dan.df.pi, Rhys.df.pi, Tet.df.pi) %>%
+  group_by(Species) %>%
+  mutate(Habitat = if_else(grepl("non_urban", Pop.ID, fixed = TRUE), "Rural", "Urban")) %>% # add urban/rural metadata
+  mutate(City = str_extract(Pop.ID, "[^_]+")) %>% # add population ID as a separate column
+  mutate(City = if_else(City == "St", "St. Catharines", City)) %>% # rename St. Catharines for sake of plotting
+  mutate(CityHabitat = glue("{City} {Habitat}")) %>% # add combined city & habitat column for grouping
+  ungroup()
+
+# calculate mean and sd of pi per species (i.e., globally),
+# group by species and habitat, calculate the mean and sd of pi
+df.pi.summary <- rbind(
+  df.pi %>% group_by(Species) %>% summarise(mean.Pi = mean(Pi), sd.Pi = sd(Pi)) %>% mutate(Habitat = "Global"),
+  df.pi %>% group_by(Species, Habitat) %>% summarise(mean.Pi = mean(Pi), sd.Pi = sd(Pi))
+)
+
+pi_summary_plot <- ggplot(df.pi.summary, aes(y = mean.Pi, x = Habitat, shape = Habitat)) +
+  ylim(0.00125, 0.005) +
+  geom_point(size = 3, fill = "black") +
+  geom_errorbar(aes(ymin = mean.Pi - sd.Pi, ymax = mean.Pi + sd.Pi)) +
+  facet_wrap(~Species, scales = "free", ncol = 1) +
+  scale_shape_manual(values = c(23, 21, 24)) + # add black border around points
+  basic_theme() +
+  labs(x = "Population", y = "Mean π")
+pi_summary_plot
+ggsave(plot = pi_summary_plot, "Figure_2_pi.tif", device = "tiff", path = "figures/", width = 4, height = 8, dpi = 600)
+
+summary(df.pi)
+
+DanPis <- read.csv("Dan_v2_populations.sumstats_summary.csv", header = TRUE)
+Danlm <- lm(Pi ~ Habitat + City + Habitat:City, data = DanPis)
+Anova(Danlm, type = "II")
+
+RPis <- read.csv("Rhys_populations.sumstats_summary.csv", header = TRUE)
+Rlm <- glm(Pi ~ Habitat + City + Habitat:City, data = RPis)
+Anova(Rlm)
+
+TPis <- read.csv("Tet_populations.sumstats_summary.csv", header = TRUE)
+Tlm <- glm(Pi ~ Habitat + City + Habitat:City, data = TPis)
+Anova(Tlm)
+
+pi_aov <- aov(Pi ~ Species + Habitat + City, data = df.pi)
+summary(pi_aov)
+emm1 <- emmeans(pi_aov, ~ Species | Habitat)
+
+####################################################################
+#
+#     Taj D Plots
+#     Taj D was calculated in vcftools with 1 kb sliding window
+#
+#####################################################################
+# load the datafiles
+rhysTD <- read.table("Rhys.Tajima.D", sep = "\t", header = TRUE) %>% mutate(Species = "Rhyssomatus")
+tetTD <- read.table("Tet.Tajima.D", sep = "\t", header = TRUE) %>% mutate(Species = "Tetraopes")
+DanTD <- read.table("Dan.Tajima.D", sep = "\t", header = TRUE) %>% mutate(Species = "Danaus")
+# combine dfs, add metadata
+df.TD <- rbind(DanTD, rhysTD, tetTD) %>%
+  group_by(Species)
+RTD_summary_plotp <- rhysTD %>%
+  ggplot(aes(x = TajimaD)) +
+  geom_histogram(binwidth = 1, fill = "black", color = "#e9ecef", alpha = 0.9) +
+  ggtitle("Rhyssomatus") +
+  labs(x = "Tajima's D", y = "frequency") +
+  basic_theme()
+TTD_summary_plotp <- tetTD %>%
+  ggplot(aes(x = TajimaD)) +
+  geom_histogram(binwidth = 1, fill = "black", color = "#e9ecef", alpha = 0.9) +
+  ggtitle("Tetraopes") +
+  labs(x = "Tajima's D", y = "frequency") +
+  basic_theme()
+DTD_summary_plotp <- DanTD %>%
+  ggplot(aes(x = TajimaD)) +
+  geom_histogram(binwidth = 1, fill = "black", color = "#e9ecef", alpha = 0.9) +
+  ggtitle("Danaus") +
+  labs(x = "Tajima's D", y = "frequency") +
+  basic_theme()
+TajD_hist <- ggarrange(DTD_summary_plotp, TTD_summary_plotp, RTD_summary_plotp,
+  ncol = 1, nrow = 3
+)
+
+danvcf <- readData("./Danaus/", format = VCF, include.unknown = TRUE, FAST = TRUE)
+####################################
+#
+#   Get SFS to run stairway plot
+#
+#####################################
+install.packages("vcf2sfs")
+library(vcf2sfs)
+# Danaus
+mygtD <- vcf2gt("Danaus2.vcf", "Dan_popmap.txt")
+# Tet
+mygtT <- vcf2gt("Tet.vcf", "Tet_popmap.txt")
+# Rhys
+mygtR <- vcf2gt("Rhys.vcf", "Rhys_popmap.txt")
+
+urbanDangt <- choose.pops(mygtD, "Urban")
+ruralDangt <- choose.pops(mygtD, "Rural")
+
+urbanTetgt <- choose.pops(mygtT, "Urban")
+ruralTetgt <- choose.pops(mygtT, "Rural")
+
+urbanRhysgt <- choose.pops(mygtR, "Urban")
+ruralRhysgt <- choose.pops(mygtR, "Rural")
+
+myUDsfs <- gt2sfs.raw(mygtD, "Urban")
+myRDsfs <- gt2sfs.raw(mygtD, "Rural")
+
+myUTsfs <- gt2sfs.raw(mygtT, "Urban")
+myRTsfs <- gt2sfs.raw(mygtT, "Rural")
+
+myURsfs <- gt2sfs.raw(mygtR, "Urban")
+myRRsfs <- gt2sfs.raw(mygtR, "Rural")
+
+write.1D.fsc(myRTsfs, "RuralTetSFS.txt")
+
+
+mygtD2 <- vcf2gt("Danaus2.vcf", "Dan_popmap2.txt")
+DanSFS <- gt2sfs.raw(mygtD2, "All")
+mygtT2 <- vcf2gt("Tet.vcf", "Tet_popmap2.txt")
+TetSFS <- gt2sfs.raw(mygtT2, "All")
+mygtR2 <- vcf2gt("Rhys.vcf", "Rhys_popmap2.txt")
+RhySFS <- gt2sfs.raw(mygtR2, "All")
+
+write.1D.fsc(DanSFS, "DanSFS.txt")
+write.1D.fsc(TetSFS, "TetSFS.txt")
+write.1D.fsc(RhySFS, "RhySFS.txt")
+
+# make plot with all stairway summary info
+DUs <- read.table("Urban_Monarch.final.summary", sep = "\t", header = TRUE)
+DRs <- read.table("Rural_Monarch.final.summary.txt", sep = "\t", header = TRUE)
+TUs <- read.table("Tet_urban.final.summary", sep = "\t", header = TRUE)
+TRs <- read.table("Tet_rural.final.summary", sep = "\t", header = TRUE)
+RUs <- read.table("Urban_Rhys.final.summary", sep = "\t", header = TRUE)
+RRs <- read.table("Rural_Rhys.final.summary", sep = "\t", header = TRUE)
+
+
+stairs40kya <- ggplot() +
+  geom_line(data = DUs, aes(x = year, y = Ne_median), color = "orange") +
+  geom_line(data = TUs, aes(x = year, y = Ne_median), color = "red") +
+  geom_line(data = RUs, aes(x = year, y = Ne_median), color = "grey19") +
+  basic_theme() +
+  xlim(0, 40000)
+
+stairs1kya <- ggplot() +
+  geom_line(data = DUs, aes(x = year, y = Ne_median), color = "orange") +
+  geom_line(data = TUs, aes(x = year, y = Ne_median), color = "red") +
+  geom_line(data = RUs, aes(x = year, y = Ne_median), color = "grey19") +
+  basic_theme() +
+  xlim(0, 1000) +
+  ylim(0, 200000)
+
+stairs_conf_dan <- ggplot() +
+  geom_line(data = DUs, aes(x = year, y = Ne_median), color = "orange") +
+  geom_line(data = DRs, aes(x = year, y = Ne_median), color = "orange", linetype = "dotted") +
+  basic_theme() +
+  xlim(0, 40000) +
+  ylim(0, 4000000) +
+  geom_ribbon(aes(x = DUs$year, y = DUs$Ne_median, ymin = DUs$Ne_2.5., ymax = DUs$Ne_97.5., xmin = 0, xmax = 1000), fill = "orange", alpha = 0.1) +
+  geom_ribbon(aes(x = DRs$year, y = DRs$Ne_median, ymin = DRs$Ne_2.5., ymax = DRs$Ne_97.5., xmin = 0, xmax = 1000), fill = "darkorange", alpha = 0.1)
+
+stairs_conf_tet <- ggplot() +
+  geom_line(data = TUs, aes(x = year, y = Ne_median), color = "red") +
+  geom_line(data = TRs, aes(x = year, y = Ne_median), color = "red", linetype = "dotted") +
+  basic_theme() +
+  xlim(0, 40000) +
+  ylim(0, 400000) +
+  geom_ribbon(aes(x = TUs$year, y = TUs$Ne_median, ymin = TUs$Ne_2.5., ymax = TUs$Ne_97.5., xmin = 0, xmax = 1000), fill = "red", alpha = 0.1) +
+  geom_ribbon(aes(x = TRs$year, y = TRs$Ne_median, ymin = TRs$Ne_2.5., ymax = TRs$Ne_97.5., xmin = 0, xmax = 1000), fill = "darkred", alpha = 0.1)
+
+stairs_conf_rhy <- ggplot() +
+  geom_line(data = RUs, aes(x = year, y = Ne_median), color = "grey19") +
+  geom_line(data = RRs, aes(x = year, y = Ne_median), color = "grey19", linetype = "dotted") +
+  basic_theme() +
+  xlim(0, 40000) +
+  ylim(0, 1500000) +
+  geom_ribbon(aes(x = RUs$year, y = RUs$Ne_median, ymin = RUs$Ne_2.5., ymax = RUs$Ne_97.5., xmin = 0, xmax = 1000), fill = "grey", alpha = 0.1) +
+  geom_ribbon(aes(x = RRs$year, y = RRs$Ne_median, ymin = RRs$Ne_2.5., ymax = RRs$Ne_97.5., xmin = 0, xmax = 1000), fill = "grey19", alpha = 0.1)
+Stairs_all <- ggarrange(stairs_conf_dan, stairs_conf_tet, stairs_conf_rhy,
+  ncol = 1, nrow = 3
+)
+
+###############################
+#
+#     FST calculations
+#
+################################
+# For Rhyssomatus
+# Pop names by Population
+setPop(Rhys.populations.gen) <- ~Population
+# Calculate FSt
+RhysFst <- genet.dist(Rhys.populations.gen, method = "Nei87")
+write.csv(RhysFst, "RhysFst.csv", row.names = TRUE)
+
+# For Tetraopes
+# Pop names by Population
+setPop(Tet.populations.gen) <- ~Population
+# Calculate Fst
+TetFst <- genet.dist(Tet.populations.gen, method = "Nei87")
+write.csv(TetFst, "TetFst.csv", row.names = TRUE)
+
+# For Danaus
+# Pop names by Population
+setPop(Danaus.populations.gen) <- ~Population
+# Calculate FST
+# allfstdan<- genet.dist(Danaus.populations.gen, method = "Nei87")
+# Too many SNPs, the code will not run, so subset 10000 SNPs
+subDan2 <- Danaus.populations.gen[, loc = c(1:100000)]
+bigfst <- genet.dist(subDan2, method = "Nei87")
+write.csv(bigfst, "DanFst.csv", row.names = TRUE)
+
+
+# plot U-U, R-R, U-R Fst values for each species, city combination -------------
+Fst.comparisons <- data.frame()
+species <- c("Dan", "Tet", "Rhys")
+for (species.name in species) {
+  # read in metadata
+  info <- glue("{species.name}_info.csv") %>%
+    read.csv() %>%
+    select(sample.id, City, Habitat) %>%
+    mutate(pop.id = substr(sample.id, 1, nchar(sample.id) - 3)) %>%
+    distinct(pop.id, City, Habitat)
+
+  # read in data
+  Fst.matrix <- glue("{species.name}.fst_summary_bySubpop.tsv") %>%
+    read.csv(sep = "\t")
+
+  # reformat to wide, wrangle
+  Fst.matrix.wide <- Fst.matrix %>%
+    gather(colname, Fst, -X) %>%
+    filter(!is.na(Fst)) %>% # remove NA entries
+    rename(pop1 = X, pop2 = colname) %>%
+    merge(info %>% rename(pop1 = pop.id, city.1 = City, habitat.1 = Habitat), by = "pop1") %>% # append metadata for first pop
+    merge(info %>% rename(pop2 = pop.id, city.2 = City, habitat.2 = Habitat), by = "pop2") %>% # append metadata for second pop
+    mutate(comparison = glue("{habitat.1}-{habitat.2}")) %>% # add comparison column
+    mutate(comparison = if_else(comparison == "non_urban-urban", "urban-non_urban", comparison)) # rename "B vs. A" to "A vs. B" to avoid duplicates
+
+  # filter to comparisons within same city, calculate mean, sd of U-U, U-R, and R-R comparisons
+  Fst.summary <- Fst.matrix.wide %>%
+    filter(city.1 == city.2) %>%
+    group_by(city.1, comparison) %>%
+    summarise(Fst.mean = mean(Fst), Fst.sd = sd(Fst)) %>%
+    # filter(!is.na(Fst.sd)) %>% # drop entries where sd is NA (due to there only being 2 pops)
+    mutate(species = species.name)
+
+  # append to main df
+  Fst.comparisons <- rbind(Fst.comparisons, Fst.summary)
+}
+
+# rename some of the entries for sake of plotting
+Fst.comparisons <- Fst.comparisons %>%
+  mutate(comparison = if_else(comparison == "urban-urban", "U-U", comparison)) %>%
+  mutate(comparison = if_else(comparison == "urban-non_urban", "U-R", comparison)) %>%
+  mutate(comparison = if_else(comparison == "non_urban-non_urban", "R-R", comparison)) %>%
+  mutate(city.1 = if_else(city.1 == "St_Catharines", "St. Catharines", city.1)) %>%
+  mutate(species = if_else(species == "Dan", "Danaus", species)) %>%
+  mutate(species = if_else(species == "Rhys", "Rhyssomatus", species)) %>%
+  mutate(species = if_else(species == "Tet", "Tetraopes", species)) %>%
+  rename(Comparison = comparison, City = city.1)
+
+# plot Fst data ----------------------------------------------------------------
+fst_plot <- ggplot(Fst.comparisons, aes(x = Comparison, y = Fst.mean, fill = City, shape = Comparison)) +
+  ylim(-0.05, 0.3) +
+  geom_errorbar(aes(ymin = Fst.mean - Fst.sd, ymax = Fst.mean + Fst.sd), position = position_dodge(0.5)) +
+  geom_point(position = position_dodge(0.5), size = 3) +
+  facet_grid(species ~ City, scales = "fixed") +
+  scale_fill_manual(values = cal_palette("kelp1")) +
+  scale_shape_manual(values = c(21, 22, 23, 24, 25, 26)) + # add black border around points
+  guides(fill = guide_legend(override.aes = list(shape = 21))) + # create legend based on fill colour
+  basic_theme() +
+  labs(x = "Comparison", y = bquote(F[ST]))
+fst_plot
+
+#################################################
+#
+#       PCA
+#
+################################################
+#' Convert vcf to gds
+#'
+#' @param vcf String of the path to the vcf.
+#'
+#' @return String of the name of the new gds file.
+convert_to_gds <- function(vcf) {
+  gds <- substr(vcf, 1, nchar(vcf) - 4) %>%
+    glue(".gds")
+  snpgdsVCF2GDS(vcf, gds, method = "copy.num.of.ref")
+  return(gds)
+}
+
+#' Runs a PCA using a gds file as input, appends metadata supplied in "pop.info".
+#'
+#' @param gds.file Path to input gds file.
+#' @param LD Specified linkage disequilibrium threshold (default = 1).
+#' @param pop.info Dataframe of individual sample meta data, matched by "sample.id".
+#' @param returnType String of either:
+#'  * "df" to only return PCA results.
+#'  * "eigenvalues" to only return eigenvalue vector.
+#'  * "both" (default) to return both eigenvalues and data as a list.
+#'
+#' @return See "returnType".
+PCA <- function(gds.file, LD = 1, pop.info, returnType = "both") {
+  # read in file
+  genoFile <- snpgdsOpen(gds.file)
+  snpset <- snpgdsLDpruning(genoFile, ld.threshold = LD)
+  snpset.id <- unlist(unname(snpset))
+
+  pca <- snpgdsPCA(genoFile, snp.id = snpset.id, num.thread = THREADS) # run PCA
+
+  # add metadata, export data
+  pc.percent <- pca$varprop * 100 # eigenvalues
+  df <- data.frame(
+    sample.id = pca$sample.id,
+    Population = substr(pca$sample.id, 1, nchar(pca$sample.id) - 3), # remove last 3 chars of sample ID to get pop ID
+    PC1 = pca$eigenvect[, 1], # the first eigenvector
+    PC2 = pca$eigenvect[, 2], # the second eigenvector
+    stringsAsFactors = FALSE
+  )
+  df <- merge(df, pop.info, by = "sample.id")
+
+  if (returnType == "both") {
+    return(list("df" = df, "eigenvalues" = pc.percent))
+  } else if (returnType == "df") {
+    return(df)
+  } else if (returnType == "eigenvalues") {
+    return(pc.percent)
+  }
+}
+
+# read in metadata -------------------------------------------------------------
+Dan.info <- read.csv("Dan_info.csv", sep = ",", header = TRUE)
+Rhys.info <- read.csv("Rhys_info.csv", sep = ",", header = TRUE)
+Tet.info <- read.csv("Tet_info.csv", sep = ",", header = TRUE)
+
+SNPs.df <- data.frame() # store PCA output
+# iterate through each species/city combination, run PCA, append data to SNPs.df
+species <- c("Dan", "Rhys", "Tet")
+cities <- c("All_Cities", "Brantford", "Guelph", "Kitchener", "London", "St_Catharines", "Toronto")
+for (species.name in species) {
+  info <- glue("{species.name}.info") %>% get() # grab species info
+  for (city in cities) {
+    vcf <- glue("{species.name}_{city}.vcf")
+    tryCatch(
+      {
+        df <- convert_to_gds(vcf) %>% # TODO: break this up into multiple steps, only need to try/catch vcf -> gcf step
+          PCA(., LD = 1, pop.info = info, returnType = "df") %>%
+          mutate(CitySubset = city)
+        SNPs.df <- rbind(df, SNPs.df)
+      },
+      error = function(e) {
+        message(e)
+      }
+    )
+  }
+}
+
+# clean up labels for plotting
+SNPs.df <- SNPs.df %>% mutate(
+  City = if_else(City == "St_Catharines", "St. Catharines", City),
+  Habitat = if_else(Habitat == "urban", "Urban", "Rural")
+)
+
+# plot PCA ---------------------------------------------------------------------
+plot_singleSNPs <- ggplot(SNPs.df, aes(PC1, PC2)) +
+  geom_jitter(aes(fill = City, shape = Habitat), size = 2) +
+  facet_wrap(Species ~ CitySubset, scales = "free") +
+  scale_fill_manual(values = cal_palette("kelp1")) +
+  scale_shape_manual(values = c(21, 24)) + # add black border around points
+  guides(fill = guide_legend(override.aes = list(shape = 21))) + # create legend based on fill colour
+  theme_gray() +
+  theme(strip.background = element_rect(linetype = 0))
+plot_singleSNPs
+
+# plot only All cities PCA
+plot_AllCityOnly <- ggplot(SNPs.df %>% filter(CitySubset == "All_Cities"), aes(PC1, PC2)) +
+  geom_jitter(aes(fill = City, shape = Habitat), size = 2) +
+  facet_wrap(~Species, scales = "free") +
+  scale_fill_manual(values = cal_palette("kelp1")) +
+  scale_shape_manual(values = c(21, 24)) + # add black border around points
+  guides(fill = guide_legend(override.aes = list(shape = 21))) + # create legend based on fill colour
+  theme_gray() +
+  theme(strip.background = element_rect(linetype = 0))
+plot_AllCityOnly
+
+# plot only All cities PCA, change Danaus scale to exclude outliers
+SNPs.df.Dan_outliersRemoved <- SNPs.df %>%
+  filter(Species == "Danaus" & CitySubset == "All_Cities") %>%
+  subset(PC1 < 0.2 & PC2 < 0.2) # only Dan, outliers removed
+SNPs.df.outliersRemoved <- SNPs.df %>%
+  filter(Species == "Rhyssomatus" | Species == "Tetraopes") %>%
+  rbind(SNPs.df.Dan_outliersRemoved) # all three, Dan outliers removed
+plot_AllCityOnly_outliersRemoved <- ggplot(SNPs.df.outliersRemoved %>% filter(CitySubset == "All_Cities"), aes(PC1, PC2)) +
+  geom_jitter(aes(fill = City, shape = Habitat), size = 2) +
+  facet_wrap(~Species, scales = "free") +
+  scale_fill_manual(values = cal_palette("kelp1")) +
+  scale_shape_manual(values = c(21, 24)) + # add black border around points
+  guides(fill = guide_legend(override.aes = list(shape = 21))) + # create legend based on fill colour
+  theme_gray() +
+  theme(strip.background = element_rect(linetype = 0))
+plot_AllCityOnly_outliersRemoved
+
+# facet each city subset, keep all other points transparent
+plot_AllCity_transparant_background <- ggplot(SNPs.df.outliersRemoved %>% filter(CitySubset == "All_Cities"), aes(PC1, PC2)) +
+  geom_jitter(data = SNPs.df.outliersRemoved %>% select(!City) %>% filter(CitySubset == "All_Cities"), aes(shape = Habitat), size = 3, colour = "gray") +
+  geom_jitter(size = 3, aes(fill = City, shape = Habitat)) +
+  facet_wrap(Species ~ City, scales = "free", ncol = 6) +
+  scale_fill_manual(values = cal_palette("kelp1")) +
+  scale_shape_manual(values = c(21, 24)) + # add black border around points
+  guides(fill = guide_legend(override.aes = list(shape = 21))) + # create legend based on fill colour
+  basic_theme()
+plot_AllCity_transparant_background
+
+# plot PCA with Danaus all cities, remove outliers
+plot_Dan_noOutliers <- ggplot(SNPs.df.Dan_outliersRemoved, aes(PC1, PC2)) +
+  geom_point(aes(fill = City, shape = Habitat)) +
+  scale_fill_manual(values = cal_palette("kelp1")) +
+  scale_shape_manual(values = c(21, 24)) + # add black border around points
+  guides(fill = guide_legend(override.aes = list(shape = 21))) + # create legend based on fill colour
+  theme_gray() +
+  theme(strip.background = element_rect(linetype = 0))
+plot_Dan_noOutliers
+
+# plot PCA showing subpopulations for each city
+plot_subpops <- ggplot(SNPs.df %>% filter(CitySubset != "All_Cities"), aes(PC1, PC2)) +
+  geom_point(aes(colour = Population, shape = Habitat)) +
+  facet_wrap(Species ~ CitySubset, scales = "free")
+plot_subpops
+
+# highlight outliers in Danaus all cities PCA, plot PCA with labels ------------
+Dan_single_outliers <- SNPs.df %>%
+  filter(Species == "Danaus" & CitySubset == "All_Cities") %>%
+  subset(PC1 > 0.2 | PC2 > 0.2)
+Dan_single_outliers
+plot_Danaus_outliers <- ggplot(SNPs.df %>%
+  filter(Species == "Danaus" & CitySubset == "All_Cities"), aes(PC1, PC2, label = sample.id)) +
+  geom_point(aes(colour = City, shape = Habitat)) +
+  geom_label_repel(data = Dan_single_outliers, point.padding = 0, box.padding = 0.5, min.segment.length = 0)
+plot_Danaus_outliers
+
+# calculate centroid data ------------------------------------------------------
+get_distance <- function(x1, y1, x2, y2) {
+  return(sqrt(((x2 - x1)^2) + ((y2 - y1)^2)))
+}
+
+SNPs.df.centroids <- SNPs.df %>%
+  filter(CitySubset == "All_Cities") %>%
+  group_by(City, Species) %>%
+  mutate(distanceToCentroid = get_distance(PC1, PC2, mean(PC1), mean(PC2))) %>%
+  ungroup()
+
+write.table(
+  SNPs.df.centroids %>% select(!CitySubset),
+  file = "PCA_CentroidDistances.csv",
+  quote = FALSE,
+  row.names = FALSE,
+  sep = ","
+)
+
+# run ANOVA, calculate estimated marginal means (emmeans) for each species -----
+
+# Danaus ANOVA & emmeans
+m_Dan <- lm(distanceToCentroid ~ Habitat + City + Habitat:City,
+  data = SNPs.df.centroids %>% filter(Species == "Danaus")
+)
+
+Anova(m_Dan, type = 2) %>% print()
+emmeans(m_Dan, "Habitat") %>% print()
+
+# Rhyssomatus ANOVA & emmeans
+m_Rhys <- lm(distanceToCentroid ~ Habitat + City + Habitat:City,
+  data = SNPs.df.centroids %>% filter(
+    Species == "Rhyssomatus",
+    City != "London", # only has urban samples
+    City != "Kitchener"
+  ) # only has urban samples
+)
+
+Anova(m_Rhys, type = 2) %>% print()
+emmeans(m_Rhys, "Habitat") %>% print()
+
+# Tetraopes ANOVA & emmeans
+m_Tet <- lm(distanceToCentroid ~ Habitat + City + Habitat:City,
+  data = SNPs.df.centroids %>% filter(
+    Species == "Tetraopes",
+    City != "Kitchener"
+  ) # only has urban samples
+)
+
+Anova(m_Tet, type = 2) %>% print()
+emmeans(m_Tet, "Habitat") %>% print()
+
+
+
+###############################################
+#
+#     DAPC
+#
+###############################################
+# Rhyssomatus DAPC
+# Set population by City/Habitat
+setPop(Rhys.populations.gen) <- ~City_Habitat
+popNames(Rhys.populations.gen)
+# "TU" "TN" "BN" "BU" "GU" "GN" "KN" "LN",
+# find the clusters in the .gen file
+Rhys.populations_grp <- find.clusters(Rhys.populations.gen, max.n.clust = 50)
+# retain all PCs (80)
+# retain clusters (50)
+
+# Kstat equals 12 because 6 cities were sampled with urban and rural
+head(Rhys.populations_grp$Kstat, 12)
+Rhys.populations_grp$stat
+head(Rhys.populations_grp$grp, 12)
+Rhys.populations_grp$size
+# K = 1 is the best fit
+
+# change inf & ori to 1:12 for 6 cities
+table(pop(Rhys.populations.gen), Rhys.populations_grp$grp)
+table.value(table(pop(Rhys.populations.gen), Rhys.populations_grp$grp), col.lab = paste("inf", 1:12), row.lab = paste("ori", 1:12))
+
+# make a DAPC
+# var.contrib=TRUE
+dapc.Rhys <- dapc(Rhys.populations.gen, var.contrib = TRUE, scale = TRUE, n.pca = 80, n.da = NULL)
+# retained 5 discriminate functions
+dapc.Rhys
+scatter(dapc.Rhys)
+# Calculate the optimum PC number to rerun DAPC
+optim.a.score(dapc.Rhys, n.pca = 1:ncol(dapc.Rhys$tab), smart = TRUE, n = 10, plot = TRUE, n.sim = 10, n.da = 2)
+# rerun the DAPC with the optimal number of PCs=39
+dapc.Rhys.optimal <- dapc(Rhys.populations.gen, var.contrib = TRUE, scale = TRUE, n.pca = 39, n.da = 5, leg = TRUE)
+dapc.Rhys.optimal
+summary(dapc.Rhys.optimal)
+scatter(dapc.Rhys.optimal, legend = TRUE)
+
+# make better looking graph
+rhycol <- c("#114C54", "#114C54", "#C70000", "#C70000", "#FFBF00", "#FFBF00", "#BE8333", "#54662C")
+scatter(dapc.Rhys.optimal,
+  legend = FALSE,
+  col = rhycol, scree.da = FALSE, clab = 0,
+  cell = 0, pch = c(17, 16, 16, 17, 17, 16, 16, 16),
+  cex = 2, solid = 1
+)
+
+# proportion of variable explained by PC
+eig_percent <- round((dapc.Rhys.optimal$eig / (sum(dapc.Rhys.optimal$eig))) * 100, 2)
+# what are the percent variance explained by PC1 and PC2?
+eig_percent[1:7]
+
+#################
+# Tetraopes DAPC
+setPop(Tet.populations.gen) <- ~City_Habitat
+popNames(Tet.populations.gen)
+# "TU" "TN" "BN" "BU" "GU" "GN" "KN" "SU" "SN"
+# find the clusters in the .gen file
+Tet.populations_grp <- find.clusters(Tet.populations.gen, max.n.clust = 50)
+# retain all PCs (150)
+# retain clusters (50)
+
+# Kstat equals 12 because 6 cities were sampled
+head(Tet.populations_grp$Kstat, 12)
+Tet.populations_grp$stat
+head(Tet.populations_grp$grp, 12)
+Tet.populations_grp$size
+# looks like k=3 is the best fit
+
+# change inf & ori to 1:5 for 5 cities
+table(pop(Tet.populations.gen), Tet.populations_grp$grp)
+table.value(table(pop(Tet.populations.gen), Tet.populations_grp$grp), col.lab = paste("inf", 1:12), row.lab = paste("ori", 1:12))
+# make a DAPC
+# var.contrib=TRUE
+dapc.Tet <- dapc(Tet.populations.gen, var.contrib = TRUE, scale = TRUE, n.pca = 100, n.da = NULL)
+# retained 4 discriminate functions
+dapc.Tet
+scatter(dapc.Tet)
+# Calculate the optimum PC number to rerun DAPC
+optim.a.score(dapc.Tet, n.pca = 1:ncol(dapc.Tet$tab), smart = TRUE, n = 10, plot = TRUE, n.sim = 10, n.da = 6)
+# rerun the DAPC with the optimal number of PCs=43
+dapc.Tet.optimal <- dapc(Tet.populations.gen, var.contrib = TRUE, scale = TRUE, n.pca = 43, n.da = 4, leg = TRUE)
+dapc.Tet.optimal
+summary(dapc.Tet.optimal)
+scatter(dapc.Tet.optimal, legend = TRUE)
+
+# create color ramp & rerun PCA with specific colors
+tetcol <- c("#114C54", "#114C54", "#C70000", "#C70000", "#FFBF00", "#FFBF00", "#BE8333", "#009BB0", "#009BB0")
+scatter(dapc.Tet.optimal,
+  legend = FALSE, col = tetcol,
+  scree.da = FALSE, clab = 0, cell = 0, pch = c(17, 16, 16, 17, 17, 16, 16, 17, 16),
+  cex = 2, solid = 1
+)
+
+
+# proportion of variable explained by PC
+eig_percent <- round((dapc.Tet.optimal$eig / (sum(dapc.Tet.optimal$eig))) * 100, 2)
+# what are the percent variance explained by PC1 and PC2?
+eig_percent[1:7]
+
+#################################
+# Danaus
+# Pop names by City
+setPop(Danaus.populations.gen) <- ~City_Habitat
+popNames(Danaus.populations.gen)
+# "BU" "BN" "GN" "GU" "KU" "KN" "LN" "LU" "SU" "SN" "TU" "TN"
+# find the clusters in the .gen file
+Danaus.populations_grp <- find.clusters(Danaus.populations.gen, max.n.clust = 50)
+# retain all PCs (100)
+# retain clusters (50)
+
+# Kstat equals 12 because 6 cities were sampled
+head(Danaus.populations_grp$Kstat, 12)
+Danaus.populations_grp$stat
+head(Danaus.populations_grp$grp, 12)
+Danaus.populations_grp$size
+# K=1
+# change inf & ori to 1:12 for 6 cities
+table(pop(Danaus.populations.gen), Danaus.populations_grp$grp)
+table.value(table(pop(Danaus.populations.gen), Danaus.populations_grp$grp), col.lab = paste("inf", 1:12), row.lab = paste("ori", 1:12))
+
+# make a DAPC
+# var.contrib=TRUE
+dapc.Danaus <- dapc(Danaus.populations.gen, var.contrib = TRUE, scale = TRUE, n.pca = 100, n.da = NULL)
+# retained 8 discriminate functions
+dapc.Danaus
+scatter(dapc.Danaus)
+
+# Calculate the optimum PC number to rerun DAPC
+optim.a.score(dapc.Danaus, n.pca = 1:ncol(dapc.Danaus$tab), smart = TRUE, n = 10, plot = TRUE, n.sim = 10, n.da = 2)
+
+# rerun the DAPC with the optimal number of PCs=68
+dapc.Danaus.optimal <- dapc(Danaus.populations.gen, var.contrib = TRUE, scale = TRUE, n.pca = 68, n.da = 8, leg = TRUE)
+dapc.Danaus.optimal
+summary(dapc.Danaus.optimal)
+scatter(dapc.Danaus.optimal, legend = TRUE)
+
+# create color ramp & rerun PCA with specific colors
+dancol <- c("#C70000", "#C70000", "#FFBF00", "#FFBF00", "#BE8333", "#BE8333", "#54662C", "#54662C", "#009BB0", "#009BB0", "#114C54", "#114C54")
+scatter(dapc.Danaus.optimal,
+  legend = FALSE, col = dancol, scree.da = FALSE, clab = 0, cell = 0,
+  pch = c(17, 16, 16, 17, 17, 16, 16, 17, 17, 16, 17, 16), xlim = c(10, -10), ylim = c(10, -10), cex = 2, solid = 1
+)
+scatter(dapc.Danaus.optimal,
+  legend = FALSE, col = dancol, scree.da = FALSE, clab = 0, cell = 0,
+  pch = c(17, 16, 16, 17, 17, 16, 16, 17, 17, 16, 17, 16), cex = 2, solid = 1
+)
+
+# proportion of variable explained by PC
+eig_percent <- round((dapc.Danaus.optimal$eig / (sum(dapc.Danaus.optimal$eig))) * 100, 2)
+# what are the percent variance explained by PC1 and PC2?
+eig_percent[1:7]
+
+
+
+###############################################
+#
+#     Admixture
+#
+###############################################
+######################################
+# visualize admixture plots for Rhys #
+######################################
+
+# useful graphical parameters here are:
+# 1. "panel.spacing.x" to control the spacing between cities
+# 2. "vjust" to move the city labels along the x axis within each group
+
+# read in populations
+Rhys_citynames <- read.csv("Rhys_populations.csv")
+# read in  K=2
+Rhys_populations_K2 <- read.table("Rhys_populations.2.Q")
+# read in  K=3
+Rhys_populations_K3 <- read.table("Rhys_populations.3.Q")
+# read in  K=4
+Rhys_populations_K4 <- read.table("Rhys_populations.4.Q")
+# read in  K=5
+Rhys_populations_K5 <- read.table("Rhys_populations.5.Q")
+# read in  K=6
+Rhys_populations_K6 <- read.table("Rhys_populations.6.Q")
+
+k2 <- bind_cols(Rhys_citynames, Rhys_populations_K2)
+k3 <- bind_cols(Rhys_citynames, Rhys_populations_K3)
+k4 <- bind_cols(Rhys_citynames, Rhys_populations_K4)
+k5 <- bind_cols(Rhys_citynames, Rhys_populations_K5)
+k6 <- bind_cols(Rhys_citynames, Rhys_populations_K6)
+
+
+
+# from wide to long
+k2long <- k2 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V2)
+
+# barplot
+k2plot <-
+  ggplot(k2long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(PopGroup), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(x = "City", title = "K=2", y = "Ancestry") +
+  scale_x_continuous(expand = expansion(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k2plot
+
+
+# from wide to long
+k3long <- k3 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V3)
+
+# barplot
+k3plot <-
+  ggplot(k3long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(PopGroup), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(x = "City", title = "K=3", y = "Ancestry") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k3plot
+
+# from wide to long
+k4long <- k4 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V4)
+
+# barplot
+k4plot <-
+  ggplot(k4long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(PopGroup), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(x = "City", title = "K=4", y = "Ancestry") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k4plot
+
+
+# from wide to long
+k5long <- k5 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V5)
+
+# barplot
+k5plot <-
+  ggplot(k5long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(PopGroup), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(x = "City", title = "K=5", y = "Ancestry") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k5plot
+
+
+# from wide to long
+k6long <- k6 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V6)
+
+# barplot
+k6plot <-
+  ggplot(k6long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(PopGroup), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(x = "City", title = "K=6", y = "Ancestry") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k6plot
+
+# stitch them together (vertically)
+Rhys_Plot <- k2plot + k3plot + k4plot + k5plot + k6plot + plot_layout(ncol = 1)
+Rhys_Plot
+# export
+
+######################################
+# visualize admixture plots for Tet #
+######################################
+
+# read in populations
+Tet_citynames <- read.csv("Tet_populations.csv")
+# read in  K=2
+Tet_populations_K2 <- read.table("Tet_populations.2.Q")
+# read in  K=3
+Tet_populations_K3 <- read.table("Tet_populations.3.Q")
+# read in  K=4
+Tet_populations_K4 <- read.table("Tet_populations.4.Q")
+# read in  K=5
+Tet_populations_K5 <- read.table("Tet_populations.5.Q")
+# read in  K=6
+Tet_populations_K6 <- read.table("Tet_populations.6.Q")
+# read in  K=7
+Tet_populations_K7 <- read.table("Tet_populations.7.Q")
+
+k2 <- bind_cols(Tet_citynames, Tet_populations_K2)
+k3 <- bind_cols(Tet_citynames, Tet_populations_K3)
+k4 <- bind_cols(Tet_citynames, Tet_populations_K4)
+k5 <- bind_cols(Tet_citynames, Tet_populations_K5)
+k6 <- bind_cols(Tet_citynames, Tet_populations_K6)
+k7 <- bind_cols(Tet_citynames, Tet_populations_K7)
+
+
+# from wide to long
+k2long <- k2 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V2)
+
+# barplot
+k2plot <-
+  ggplot(k2long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(PopGroup), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(x = "City", title = "K=2", y = "Ancestry") +
+  scale_x_continuous(expand = expansion(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k2plot
+
+
+# from wide to long
+k3long <- k3 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V3)
+
+# barplot
+k3plot <-
+  ggplot(k3long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(PopGroup), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(x = "City", title = "K=3", y = "Ancestry") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k3plot
+
+# from wide to long
+k4long <- k4 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V4)
+
+# barplot
+k4plot <-
+  ggplot(k4long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(PopGroup), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(x = "City", title = "K=4", y = "Ancestry") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k4plot
+
+
+# from wide to long
+k5long <- k5 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V5)
+
+# barplot
+k5plot <-
+  ggplot(k5long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(PopGroup), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(x = "City", title = "K=5", y = "Ancestry") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k5plot
+
+
+# from wide to long
+k6long <- k6 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V6)
+
+# barplot
+k6plot <-
+  ggplot(k6long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(PopGroup), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(x = "City", title = "K=6", y = "Ancestry") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k6plot
+
+
+
+# from wide to long
+k7long <- k7 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V7)
+
+# barplot
+k7plot <-
+  ggplot(k7long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(PopGroup), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(x = "City", title = "K=7", y = "Ancestry") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k7plot
+
+
+
+# stitch them together (vertically)
+Tet_Plot <- k2plot + k3plot + k4plot + k5plot + k6plot + k7plot + plot_layout(ncol = 1)
+Tet_Plot
+# export
+
+
+
+######################################
+# visualize admixture plots for Dan #
+######################################
+# Had to trim the data to have admixture run. Trimmed to 10%, which is ~50,000 SNPs
+# read in populations
+Dan_citynames <- read.csv("Dan_samples.csv", header = TRUE)
+Dan_citynames <- Dan_info$Population
+# read in  K=2
+Dan_populations_K2 <- read.table("Dan.populations.recoded.thinned10.2.Q")
+# read in  K=3
+Dan_populations_K3 <- read.table("Dan.populations.recoded.thinned10.3.Q")
+# read in  K=4
+Dan_populations_K4 <- read.table("Dan.populations.recoded.thinned10.4.Q")
+# read in  K=5
+Dan_populations_K5 <- read.table("Dan.populations.recoded.thinned10.5.Q")
+# read in  K=6
+Dan_populations_K6 <- read.table("Dan.populations.recoded.thinned10.6.Q")
+# read in  K=7
+Dan_populations_K7 <- read.table("Dan.populations.recoded.thinned10.7.Q")
+
+k2 <- bind_cols(Dan_citynames, Dan_populations_K2)
+k3 <- bind_cols(Dan_citynames, Dan_populations_K3)
+k4 <- bind_cols(Dan_citynames, Dan_populations_K4)
+k5 <- bind_cols(Dan_citynames, Dan_populations_K5)
+k6 <- bind_cols(Dan_citynames, Dan_populations_K6)
+k7 <- bind_cols(Dan_citynames, Dan_populations_K7)
+
+
+# from wide to long
+k2long <- k2 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V2)
+
+# barplot
+k2plot <-
+  ggplot(k2long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(City), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(y = "K=2") +
+  scale_x_continuous(expand = expansion(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k2plot
+
+
+# from wide to long
+k3long <- k3 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V3)
+
+# barplot
+k3plot <-
+  ggplot(k3long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(City), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(y = "K=3") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k3plot
+
+# from wide to long
+k4long <- k4 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V4)
+
+# barplot
+k4plot <-
+  ggplot(k4long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(City), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(y = "K=4") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k4plot
+
+
+# from wide to long
+k5long <- k5 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V5)
+
+# barplot
+k5plot <-
+  ggplot(k5long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(City), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(y = "K=5") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k5plot
+
+
+# from wide to long
+k6long <- k6 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V6)
+
+# barplot
+k6plot <-
+  ggplot(k6long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(City), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(y = "K=6") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k6plot
+
+
+
+# from wide to long
+k7long <- k7 %>%
+  rowid_to_column() %>%
+  gather("p_group", "ancestry", V1:V7)
+
+# barplot
+k7plot <-
+  ggplot(k7long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(City), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(x = "City", y = "K=7") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k7plot
+
+
+
+# stitch them together (vertically)
+Dan_Plot <- k2plot + k3plot + k4plot + k5plot + k6plot + k7plot + plot_layout(ncol = 1)
+Dan_Plot
+# export
+ggsave("Dan_ADMIXTURE_draft.pdf", width = 8.5, height = 11, units = "in", dpi = 300)
+
+ggsave("Dan_ADMIXTURE_draft.tiff", width = 8.5, height = 11, units = "in", dpi = 300)
+
+
+# Now by Habitat
+# barplot
+k2plotb <-
+  ggplot(k2long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(Habitat), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(y = "K=2") +
+  scale_x_continuous(expand = expansion(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+
+k3plotb <-
+  ggplot(k3long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(Habitat), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(y = "K=3") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k4plotb <-
+  ggplot(k4long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(Habitat), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(y = "K=4") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k5plotb <-
+  ggplot(k5long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(Habitat), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(y = "K=5") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k6plotb <-
+  ggplot(k6long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(Habitat), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(y = "K=6") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+k7plotb <-
+  ggplot(k7long, aes(rowid, ancestry, fill = p_group)) +
+  geom_col() +
+  facet_grid(~ fct_inorder(Habitat), scales = "free", switch = "x", space = "free") +
+  theme_minimal() +
+  labs(x = "City", y = "K=7") +
+  scale_x_continuous(expand = expand_scale(add = 3)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.spacing.x = unit(0.1, "lines"),
+    strip.text.x = element_text(angle = 90, vjust = 0.98),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  scale_fill_gdocs(guide = FALSE)
+
+
+# stitch them together (vertically)
+Dan_Plot2 <- k2plotb + k3plotb + k4plotb + k5plotb + k6plotb + k7plotb + plot_layout(ncol = 1)
+Dan_Plot2
+# export
